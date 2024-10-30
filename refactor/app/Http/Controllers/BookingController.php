@@ -35,17 +35,20 @@ class BookingController extends Controller
      */
     public function index(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        $validatedData = $request->validate([
+            'user_id' => 'nullable|integer',
+        ]);
 
+        if ($user_id = $validatedData['user_id'] ?? null) {
             $response = $this->repository->getUsersJobs($user_id);
-
-        }
-        elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
-        {
+        } elseif ($request->__authenticatedUser->user_type == config('app.users.admin_id') || $request->__authenticatedUser->user_type == config('users.super_admin_role')) {
             $response = $this->repository->getAll($request);
+        } else {
+            \Log::warning('Unauthorized access attempt by user ID: ' . $request->__authenticatedUser->id);
+            return response()->json(['error' => 'Unauthorized access'], 401);
         }
 
-        return response($response);
+        return response()->json($response, 200);
     }
 
     /**
@@ -55,8 +58,11 @@ class BookingController extends Controller
     public function show($id)
     {
         $job = $this->repository->with('translatorJobRel.user')->find($id);
+        if (!$job) {
+            return response()->json(['error' => 'Job not found'], 404);
+        }
 
-        return response($job);
+        return response()->json($job, 200);
     }
 
     /**
@@ -65,13 +71,22 @@ class BookingController extends Controller
      */
     public function store(Request $request)
     {
-        $data = $request->all();
+        $validatedData = $request->validate([
+            'from_language_id' => 'required|integer',
+            'immediate' => 'required|in:yes,no',
+            'due_date' => 'nullable|date_format:m/d/Y',
+            'due_time' => 'nullable|date_format:H:i',
+            'customer_phone_type' => 'nullable|string',
+            'customer_physical_type' => 'nullable|string',
+            'duration' => 'required|string',
+            'job_for' => 'required|array',
+            'job_for.*' => 'string|in:normal,certified,certified_in_law,certified_in_health',
+        ]);
 
-        $response = $this->repository->store($request->__authenticatedUser, $data);
-
-        return response($response);
-
+        $response = $this->repository->store($request->__authenticatedUser, $validatedData);
+        return response()->json($response, $response['status'] === 'success' ? 200 : 400);
     }
+
 
     /**
      * @param $id
@@ -80,9 +95,17 @@ class BookingController extends Controller
      */
     public function update($id, Request $request)
     {
-        $data = $request->all();
+        // Validate the request data
+        $request->validate([
+            'due' => 'required|date',
+            'from_language_id' => 'required|integer',
+            'admin_comments' => 'nullable|string',
+            'reference' => 'nullable|string',
+        ]);
+
+        $data = $request->except(['_token', 'submit']);
         $cuser = $request->__authenticatedUser;
-        $response = $this->repository->updateJob($id, array_except($data, ['_token', 'submit']), $cuser);
+        $response = $this->repository->updateJob($id, $data, $cuser);
 
         return response($response);
     }
@@ -195,60 +218,31 @@ class BookingController extends Controller
     public function distanceFeed(Request $request)
     {
         $data = $request->all();
+        $distance = $data['distance'] ?? '';
+        $time = $data['time'] ?? '';
+        $jobid = $data['jobid'] ?? null;
+        $session = $data['session_time'] ?? '';
+        $flagged = ($data['flagged'] ?? 'false') === 'true' ? 'yes' : 'no';
+        $manually_handled = ($data['manually_handled'] ?? 'false') === 'true' ? 'yes' : 'no';
+        $by_admin = ($data['by_admin'] ?? 'false') === 'true' ? 'yes' : 'no';
+        $admincomment = $data['admincomment'] ?? '';
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
-        }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
+        if (is_null($jobid)) {
+            return response()->json(['status' => 'fail', 'message' => 'Job ID is required'], 400);
         }
 
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
+        if ($flagged === 'yes' && empty($adminComment)) {
+            return response()->json(['status' => 'fail', 'message' => 'Please, add a comment for flagged jobs'], 400);
         }
 
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
-
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
-        }
-
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
         if ($time || $distance) {
 
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
+            Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
         }
 
         if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
 
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
-
+            Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
         }
 
         return response('Record updated!');
@@ -266,6 +260,9 @@ class BookingController extends Controller
     {
         $data = $request->all();
         $job = $this->repository->find($data['jobid']);
+        if (!$job) {
+            return response()->json(['error' => 'Job not found'], 404);
+        }
         $job_data = $this->repository->jobToData($job);
         $this->repository->sendNotificationTranslator($job, $job_data, '*');
 
@@ -281,6 +278,9 @@ class BookingController extends Controller
     {
         $data = $request->all();
         $job = $this->repository->find($data['jobid']);
+        if (!$job) {
+            return response()->json(['error' => 'Job not found'], 404);
+        }
         $job_data = $this->repository->jobToData($job);
 
         try {
